@@ -1,3 +1,4 @@
+# [IMPORTS Y CONFIG INICIALES]
 import os
 import zipfile
 import shutil
@@ -27,33 +28,73 @@ def cargar_configuracion():
         config.read(CONFIG_FILE)
     return config
 
-def mover_archivos(tempdir, destino_base):
+def mover_y_renombrar_archivos(origenes, destino_base, nombre_componente=None, is_ul=False):
     archivos_sym = []
-    for root, _, files in os.walk(tempdir):
-        for archivo in files:
-            ext = os.path.splitext(archivo)[1].lower()
-            if ext in EXTENSIONES:
-                carpeta_destino = os.path.join(destino_base, EXTENSIONES[ext])
-                os.makedirs(carpeta_destino, exist_ok=True)
-                origen = os.path.join(root, archivo)
-                destino = os.path.join(carpeta_destino, archivo)
-                if not os.path.exists(destino):
-                    shutil.move(origen, destino)
-                    print(f"Movido: {origen} → {destino}")
-                    if ext == ".kicad_sym":
-                        archivos_sym.append(os.path.abspath(destino))
+    mod_count = 0
+
+    for archivo_original in origenes:
+        ext = os.path.splitext(archivo_original)[1].lower()
+        if ext in EXTENSIONES:
+            carpeta_destino = os.path.join(destino_base, EXTENSIONES[ext])
+            os.makedirs(carpeta_destino, exist_ok=True)
+
+            if is_ul:
+                if ext == ".kicad_sym":
+                    nuevo_nombre = f"{nombre_componente}.kicad_sym"
+                elif ext == ".kicad_mod":
+                    mod_count += 1
+                    nuevo_nombre = f"{nombre_componente}_{mod_count}.kicad_mod"
                 else:
-                    print(f"Ya existe: {destino}")
+                    nuevo_nombre = f"{nombre_componente}{ext}"
+            else:
+                nuevo_nombre = os.path.basename(archivo_original)
+
+            destino = os.path.join(carpeta_destino, nuevo_nombre)
+
+            if not os.path.exists(destino):
+                shutil.move(archivo_original, destino)
+                print(f"Movido: {archivo_original} → {destino}")
+                if ext == ".kicad_sym":
+                    archivos_sym.append(os.path.abspath(destino))
+            else:
+                print(f"Ya existe: {destino}, no se mueve.")
+
     return archivos_sym
 
 def procesar_zip(zip_path, destino_base):
-    print(f"Procesando ZIP: {zip_path}")
+    nombre_zip = os.path.basename(zip_path)
+    es_ul = nombre_zip.startswith("ul_")
+    nombre_componente = os.path.splitext(nombre_zip)[0].replace("ul_", "") if es_ul else None
+
     with tempfile.TemporaryDirectory() as tempdir:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(tempdir)
-        archivos_sym = mover_archivos(tempdir, destino_base)
+
+        archivos_a_mover = []
+        if es_ul and os.path.isdir(os.path.join(tempdir, "KiCADv6")):
+            # Recorrer recursivamente dentro de KiCADv6
+            for root, _, files in os.walk(os.path.join(tempdir, "KiCADv6")):
+                for archivo in files:
+                    path_completo = os.path.join(root, archivo)
+                    if os.path.splitext(archivo)[1].lower() in EXTENSIONES:
+                        archivos_a_mover.append(path_completo)
+        else:
+            # SnapEDA: buscar todo en el zip
+            for root, _, files in os.walk(tempdir):
+                for archivo in files:
+                    path_completo = os.path.join(root, archivo)
+                    if os.path.splitext(archivo)[1].lower() in EXTENSIONES:
+                        archivos_a_mover.append(path_completo)
+
+        archivos_sym = mover_y_renombrar_archivos(
+            archivos_a_mover,
+            destino_base,
+            nombre_componente,
+            is_ul=es_ul
+        )
+
     os.remove(zip_path)
-    print(f"Eliminado ZIP: {zip_path}")
+    print(f"ZIP eliminado: {zip_path}")
     return archivos_sym
 
 def actualizar_sym_lib_table(proyecto_path, archivos_sym):
@@ -78,23 +119,18 @@ def actualizar_sym_lib_table(proyecto_path, archivos_sym):
         if nombre not in existentes:
             uri = f"${{KIPRJMOD}}/lib/{os.path.basename(path)}"
             entrada = f'  (lib (name "{nombre}")(type "KiCad")(uri "{uri}")(options "")(descr ""))\n'
-            nuevas_entradas.append((nombre, entrada))
+            nuevas_entradas.append(entrada)
 
-    if not nuevas_entradas:
+    if nuevas_entradas:
+        for i in range(len(lineas) - 1, -1, -1):
+            if lineas[i].strip() == ")":
+                lineas[i:i] = nuevas_entradas
+                break
+        with open(tabla_path, "w") as f:
+            f.writelines(lineas)
+        print(f"{len(nuevas_entradas)} nuevas entradas añadidas a sym-lib-table.")
+    else:
         print("No se añadieron nuevos símbolos (ya estaban presentes).")
-        return
-
-    # Insertar justo antes del paréntesis de cierre
-    for i in range(len(lineas) - 1, -1, -1):
-        if lineas[i].strip() == ")":
-            lineas[i:i] = [entrada for _, entrada in nuevas_entradas]
-            break
-
-    with open(tabla_path, "w") as f:
-        f.writelines(lineas)
-
-    print(f"{len(nuevas_entradas)} nuevas entradas añadidas a sym-lib-table.")
-
 
 def actualizar_fp_lib_table(proyecto_path):
     tabla_path = os.path.join(os.path.dirname(proyecto_path), "fp-lib-table")
@@ -149,7 +185,7 @@ def ejecutar_importacion(proyecto_path, zip_folder):
         actualizar_sym_lib_table(proyecto_path, nuevos_sym)
     actualizar_fp_lib_table(proyecto_path)
 
-    messagebox.showinfo("Importación completada", f"{len(zips)} ZIPs procesados.")
+    messagebox.showinfo("Importación completada", f"{len(zips)} ZIPs procesados.\n🔁 Si tenías KiCad abierto, reinicia el proyecto para ver las nuevas librerías.")
 
 def iniciar_gui():
     config = cargar_configuracion()
@@ -170,7 +206,7 @@ def iniciar_gui():
         ejecutar_importacion(entrada_proyecto.get(), entrada_zip.get())
 
     ventana = tk.Tk()
-    ventana.title("Importador SnapEDA - Solo Local")
+    ventana.title("Importador SnapEDA + UL (solo local)")
 
     tk.Label(ventana, text="Ruta del proyecto (.kicad_pro):").pack()
     entrada_proyecto = tk.Entry(ventana, width=60)
