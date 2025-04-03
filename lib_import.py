@@ -20,7 +20,7 @@ def load_configuration():
     config = configparser.ConfigParser()
     if not os.path.exists(CONFIG_FILE):
         config["Paths"] = {
-            "default_zip_folder": "default"
+            "default_zip_folder": "/home/jairo/Descargas/components_folder"
         }
         with open(CONFIG_FILE, "w") as f:
             config.write(f)
